@@ -1,0 +1,11 @@
+name: "mind_sports_pipeline"
+version: "1.0.0"
+profile: "mind_duckdb"
+model-paths: ["models"]
+
+models:
+  mind_sports_pipeline:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
