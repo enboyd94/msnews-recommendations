@@ -7,6 +7,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from scipy.sparse import csr_matrix
 import duckdb
 
 st.set_page_config(
@@ -20,127 +21,88 @@ st.set_page_config(
 # 1. DATA LAYER (Swap these cached loaders with MIND-small TSV files later)
 # ---------------------------------------------------------------------------
 @st.cache_data
-def load_articles():
+def load_data():
     con = duckdb.connect("data/mind.duckdb", read_only=True)
     articles = con.execute("SELECT * FROM sports_news").df()
     interactions = con.execute("SELECT * FROM sports_interactions").df()
     users = con.execute("SELECT * FROM user_features").df()
     con.close()
-    return articles, interactions, users
-# def load_articles() -> pd.DataFrame:
-#     """Mock sports catalog matching the MIND news.tsv schema + age in hours."""
-#     articles = [
-#         ("A01", "NFL", "Chiefs' Red Zone Playcalling Is Evolving Ahead of the Playoffs",
-#          "Film breakdown of motion rates, tight end seams, and Andy Reid's late-season adjustments.", 3),
-#         ("A02", "NFL", "Quarterback Pressure Rates: Which Offensive Lines Are Cracking?",
-#          "Using tracking data to separate quarterback sack avoidance from true pass-blocking collapse.", 14),
-#         ("A03", "NFL", "2026 NFL Draft Big Board: Top Edge Rushers Rising After Combine",
-#          "Scouting reports, athletic testing percentiles, and scheme fits for first-round defenders.", 36),
-#         ("A04", "NBA", "Why Small-Ball Switch Defenses Are Back in the Western Conference",
-#          "Lineup data shows versatile wings are neutralizing drop coverage in clutch minutes.", 5),
-#         ("A05", "NBA", "Trade Deadline Winners: How Rim Protection Shifted Title Odds",
-#          "Expected points saved at the rim and updated playoff projection models post-deadline.", 22),
-#         ("A06", "NBA", "Inside the 3-Point Revolution: Corner Shooting vs. Pull-Up Volume",
-#          "Shot-quality metrics reveal which contenders rely on sustainable spacing.", 48),
-#         ("A07", "Premier League", "Arsenal's Set-Piece Routine: Anatomy of a Near-Post Overload",
-#          "Tactical analysis of blocking patterns, delivery height, and expected goals from corners.", 2),
-#         ("A08", "Premier League", "Summer Transfer Window: Midfield Press-Resistance Targets",
-#          "Data scouting progressive carries and ball retention under high-intensity pressure.", 18),
-#         ("A09", "Premier League", "Title Race Run-In: Fixture Difficulty and Squad Fatigue Models",
-#          "Minutes-load projections for the top three clubs across domestic and European competitions.", 30),
-#         ("A10", "MLB", "Pitch Design Lab: How Sweeper Sliders Changed Right-on-Right Matchups",
-#          "Horizontal break, seam-shifted wake, and whiff rate trends across starting rotations.", 8),
-#         ("A11", "MLB", "Bullpen Leverage Management: Are Managers Pulling Starters Too Early?",
-#          "Third-time-through-the-order penalties weighed against high-leverage reliever fatigue.", 40),
-#         ("A12", "NHL", "Expected Goals on the Power Play: The Bumper Position Explained",
-#          "How elite units manipulate penalty-kill triangles to open royal-road passes.", 10),
-#         ("A13", "NFL", "Salary Cap Gymnastics: Void Years and Future Dead-Money Risks",
-#          "Front office cap strategies explained for contenders pushing their window open.", 6),
-#         ("A14", "NBA", "Rookie Development Curves: Who Is Outperforming Draft Position?",
-#          "On/off net rating and usage efficiency for first-year rotation players.", 12),
-#         ("A15", "Premier League", "Goalkeeper Sweeper Metrics: Quantifying Box Command",
-#          "Measuring defensive actions outside the penalty area and prevented through-balls.", 26),
-#     ]
-#     return pd.DataFrame(
-#         articles,
-#         columns=["article_id", "subcategory", "title", "abstract", "hours_ago"],
-#     )
 
+    # 1. Fill nulls and add deterministic simulated article age (MIND has no publish time)
+    rng = np.random.default_rng(42)
+    articles["subcategory"] = articles["subcategory"].fillna("sports").astype(str)
+    articles["title"] = articles["title"].fillna("").astype(str)
+    articles["abstract"] = articles["abstract"].fillna("").astype(str)
+    if "hours_ago" not in articles.columns:
+        articles["hours_ago"] = rng.integers(1, 72, size=len(articles))
 
-@st.cache_data
-def load_users_and_interactions() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Mock user profiles (4 featured personas + 6 background users for SVD)."""
-    users = pd.DataFrame(
+    # 2. Add derived UI/propensity columns for real MIND users
+    if "avg_read_time_min" not in users.columns:
+        users["avg_read_time_min"] = np.clip(
+            2.0 + 0.35 * users["articles_read_30d"] + rng.normal(0, 0.8, len(users)),
+            1.0,
+            12.0,
+        ).round(1)
+
+    if "persona" not in users.columns:
+        users["persona"] = np.where(
+            users["sport_diversity"] >= 3,
+            "Multi-Sport Fan",
+            np.where(users["articles_read_30d"] >= 10, "Avid Single-Sport Reader", "Casual Reader"),
+        )
+
+    # Pick 20 random users + 1 synthetic Cold-Start visitor for the sidebar
+    top_users = users.sort_values("articles_read_30d", ascending=False).sample(20).copy()
+    cold_start = pd.DataFrame(
         [
-            # Featured personas shown in the sidebar
-            ("U101", "Casual NFL Reader", 3, 2, 1, 3.2, True),
-            ("U204", "Die-Hard Multi-Sport Fan", 18, 6, 4, 8.5, True),
-            ("U309", "Premier League Tactician", 11, 5, 1, 7.1, True),
-            ("U412", "Cold-Start New Visitor", 0, 1, 0, 1.0, True),
-            # Background users to populate the collaborative filtering matrix
-            ("U501", "NFL & NBA Follower", 12, 4, 2, 6.0, False),
-            ("U502", "MLB Analytics Reader", 9, 4, 2, 5.8, False),
-            ("U503", "Soccer & NHL Fan", 14, 5, 2, 7.4, False),
-            ("U504", "Weekend Skimmer", 2, 1, 1, 2.1, False),
-            ("U505", "All-Sports Subscriber", 22, 7, 5, 9.2, False),
-            ("U506", "NBA Draft Junkie", 10, 4, 1, 6.5, False),
-        ],
-        columns=[
-            "user_id",
-            "persona",
-            "articles_read_30d",
-            "sessions_7d",
-            "sport_diversity",
-            "avg_read_time_min",
-            "is_featured",
-        ],
+            {
+                "user_id": "COLD_START_USER",
+                "articles_read_30d": 0,
+                "sessions_7d": 1,
+                "sport_diversity": 0,
+                "avg_read_time_min": 1.0,
+                "persona": "Cold-Start New Visitor",
+            }
+        ]
     )
+    featured_users = pd.concat([top_users, cold_start], ignore_index=True)
 
-    # Implicit click interactions (user_id, article_id)
-    clicks = [
-        # Featured personas
-        ("U101", "A01"), ("U101", "A02"),
-        ("U204", "A01"), ("U204", "A04"), ("U204", "A07"), ("U204", "A10"), ("U204", "A12"),
-        ("U309", "A07"), ("U309", "A08"), ("U309", "A09"),
-        # U412 intentionally has 0 clicks (Cold-Start)
-        # Background users
-        ("U501", "A01"), ("U501", "A02"), ("U501", "A03"), ("U501", "A04"), ("U501", "A13"),
-        ("U502", "A10"), ("U502", "A11"), ("U502", "A02"), ("U502", "A13"),
-        ("U503", "A07"), ("U503", "A08"), ("U503", "A12"), ("U503", "A15"),
-        ("U504", "A04"), ("U504", "A06"),
-        ("U505", "A01"), ("U505", "A04"), ("U505", "A05"), ("U505", "A07"), ("U505", "A10"), ("U505", "A14"),
-        ("U506", "A04"), ("U506", "A05"), ("U506", "A06"), ("U506", "A14"),
-    ]
-    interactions = pd.DataFrame(clicks, columns=["user_id", "article_id"])
-    return users, interactions
-
+    return articles, interactions, featured_users
 
 # ---------------------------------------------------------------------------
 # 2. MODELS (Content-Based, Collaborative Filtering, Subscription Propensity)
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def fit_models(articles: pd.DataFrame, interactions: pd.DataFrame):
-    # A. Content-Based: TF-IDF over subcategory + title + abstract
-    corpus = (
-        articles["subcategory"] + " " + articles["title"] + " " + articles["abstract"]
-    )
-    tfidf = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
+    # A. Content-Based: TF-IDF
+    corpus = articles["subcategory"] + " " + articles["title"] + " " + articles["abstract"]
+    tfidf = TfidfVectorizer(stop_words="english", max_features=10000)
     tfidf_matrix = tfidf.fit_transform(corpus)
 
-    # B. Collaborative Filtering: User-Item Matrix + TruncatedSVD
-    pivot = (
-        interactions.assign(clicked=1)
-        .pivot_table(index="user_id", columns="article_id", values="clicked", fill_value=0)
-        .reindex(columns=articles["article_id"], fill_value=0)
-    )
-    svd = TruncatedSVD(n_components=3, random_state=42)
-    user_factors = svd.fit_transform(pivot.values)
-    reconstructed = user_factors @ svd.components_
-    cf_scores_df = pd.DataFrame(
-        reconstructed, index=pivot.index, columns=pivot.columns
-    )
+    # B. Collaborative Filtering: Sparse User-Item Matrix + TruncatedSVD
+    user_ids = interactions["user_id"].unique()
+    article_ids = articles["article_id"].unique()
+    user_to_idx = {u: i for i, u in enumerate(user_ids)}
+    art_to_idx = {a: i for i, a in enumerate(article_ids)}
 
-    # C. Subscription Propensity: Logistic Regression on synthetic historical cohort
+    valid = interactions[interactions["article_id"].isin(art_to_idx)]
+    rows = valid["user_id"].map(user_to_idx).values
+    cols = valid["article_id"].map(art_to_idx).values
+    mat = csr_matrix((np.ones(len(valid)), (rows, cols)), shape=(len(user_ids), len(article_ids)))
+
+    n_components = min(32, min(mat.shape) - 1)
+    svd = TruncatedSVD(n_components=n_components, random_state=42)
+    user_factors = svd.fit_transform(mat)
+    item_factors = svd.components_  # shape: (n_components, n_articles)
+
+    cf_model = {
+        "user_to_idx": user_to_idx,
+        "user_factors": user_factors,
+        "item_factors": item_factors,
+        "article_ids": article_ids,
+    }
+
+    # C. Subscription Propensity: Logistic Regression
     rng = np.random.default_rng(42)
     n_samples = 400
     synth = pd.DataFrame(
@@ -158,13 +120,12 @@ def fit_models(articles: pd.DataFrame, interactions: pd.DataFrame):
         + 0.25 * synth["sport_diversity"]
         + 0.22 * synth["avg_read_time_min"]
     )
-    probs = 1 / (1 + np.exp(-logit))
-    y = rng.binomial(1, probs)
+    y = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     propensity_model = make_pipeline(StandardScaler(), LogisticRegression())
     propensity_model.fit(synth, y)
 
-    return tfidf_matrix, cf_scores_df, propensity_model
+    return tfidf_matrix, cf_model, propensity_model
 
 
 def get_recommendations(
@@ -192,11 +153,12 @@ def get_recommendations(
         user_profile = np.asarray(tfidf_matrix[read_idx].mean(axis=0))
         df["raw_score"] = cosine_similarity(user_profile, tfidf_matrix).flatten()
     else:
-        # Collaborative Filtering (TruncatedSVD)
-        raw = cf_scores_df.loc[user_id].reindex(df["article_id"]).values
-        # Min-max normalize to [0, 1] for clean display and recency blending
-        min_v, max_v = raw.min(), raw.max()
-        df["raw_score"] = (raw - min_v) / (max_v - min_v + 1e-9)
+        u_idx = cf_scores_df["user_to_idx"][user_id]
+        raw = cf_scores_df["user_factors"][u_idx] @ cf_scores_df["item_factors"]
+        score_map = pd.Series(raw, index=cf_scores_df["article_ids"])
+        vals = df["article_id"].map(score_map).fillna(0.0).values
+        min_v, max_v = vals.min(), vals.max()
+        df["raw_score"] = (vals - min_v) / (max_v - min_v + 1e-9)
 
     # Exponential recency decay: exp(-hours_ago / 24)
     df["freshness"] = np.exp(-df["hours_ago"] / 24.0)
@@ -216,17 +178,15 @@ def get_recommendations(
 # ---------------------------------------------------------------------------
 # 3. UI LAYOUT
 # ---------------------------------------------------------------------------
-articles_df = load_articles()
-users_df, interactions_df = load_users_and_interactions()
+articles_df, interactions_df, users_df = load_data()
 tfidf_mat, cf_df, prop_model = fit_models(articles_df, interactions_df)
 
-# --- Sidebar Controls ---
 with st.sidebar:
     st.header("Demo Controls")
 
-    featured = users_df[users_df["is_featured"]]
     persona_map = {
-        f"{row.user_id} — {row.persona}": row.user_id for row in featured.itertuples()
+        f"{row.user_id} — {row.persona} ({row.articles_read_30d} reads)": row.user_id
+        for row in users_df.itertuples()
     }
     selected_label = st.selectbox("Select User Persona", list(persona_map.keys()))
     selected_user_id = persona_map[selected_label]
@@ -272,7 +232,7 @@ elif propensity_pct >= 35:
 else:
     tier, delta_color = "Low Intent — Focus on Engagement", "inverse"
 
-st.title("Sports News Recommendation & Subscriber Propensity")
+st.title("Sports News Recommendation System")
 st.caption(f"Active Profile: **{user_row['persona']}** (`{selected_user_id}`)  |  Engine: **{model_choice}**")
 
 # --- Top KPI Row ---
@@ -333,9 +293,13 @@ with context_col:
     if history.empty:
         st.warning("No reading history yet for this user.")
     else:
-        for row in history.itertuples():
-            with st.container(border=True):
+        with st.container(height=320, border=True):
+            for row in history.head(10).itertuples():
                 st.markdown(f"**{row.subcategory}** — {row.title}")
+                st.divider()
+
+        if len(history) > 10:
+            st.caption(f"Showing 10 of {len(history)} articles read.")
 
     st.subheader("Propensity Driver Breakdown")
     with st.container(border=True):
