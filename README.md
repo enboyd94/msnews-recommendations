@@ -103,6 +103,21 @@ Open **`http://localhost:8501`** in your browser.
 
 ---
 
+## Optional - View the Tables
+
+If you'd like to look at the tables generated from the queries in this repo, here is how you can through duckDb:
+
+### 1. Install the DuckDB CLI (if not already installed)
+* **macOS (Homebrew):**
+  ```bash
+  brew install duckdb
+### 2. Run the local UI from the repository root:
+  ```bash
+    duckdb -ui data/mind.duckdb
+  ```
+
+Note that the local UI for the duckDB and Streamlit use the same port, so stop the Streamlit app before proceeding to the tables. 
+
 ## Notes & Limitations
 - **Simulated Fields:** The public MIND dataset does not include article publish timestamps or subscription billing labels. `hours_ago`, `avg_read_time_min`, and the binary conversion target are simulated to demonstrate recency decay and propensity modeling end-to-end.
 - **Production Scaling:** In a production environment, swapping `dbt-duckdb` for a cloud warehouse adapter (e.g., `dbt-snowflake` or `dbt-bigquery`) requires only updating `profiles.yml`.
