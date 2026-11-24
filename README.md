@@ -1,4 +1,4 @@
-# Sports News Recommendation System & Subscriber Propensity Demo
+# Sports News Recommendation System!!!!
 
 An end-to-end data science prototype built to mirror sports media personalization and subscription conversion workflows. Raw user click logs from the **Microsoft News Dataset (MIND)** are filtered and transformed into analytics-ready feature tables using **dbt + DuckDB**, then served through a **Dockerized Streamlit** application.
 
